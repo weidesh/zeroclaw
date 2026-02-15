@@ -62,9 +62,11 @@ impl Tool for DelegateTool {
         let agent_names: Vec<&str> = self.agents.keys().map(|s: &String| s.as_str()).collect();
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "agent": {
                     "type": "string",
+                    "minLength": 1,
                     "description": format!(
                         "Name of the agent to delegate to. Available: {}",
                         if agent_names.is_empty() {
@@ -76,6 +78,7 @@ impl Tool for DelegateTool {
                 },
                 "prompt": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "The task/prompt to send to the sub-agent"
                 },
                 "context": {
@@ -91,14 +94,36 @@ impl Tool for DelegateTool {
         let agent_name = args
             .get("agent")
             .and_then(|v| v.as_str())
+            .map(str::trim)
             .ok_or_else(|| anyhow::anyhow!("Missing 'agent' parameter"))?;
+
+        if agent_name.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("'agent' parameter must not be empty".into()),
+            });
+        }
 
         let prompt = args
             .get("prompt")
             .and_then(|v| v.as_str())
+            .map(str::trim)
             .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter"))?;
 
-        let context = args.get("context").and_then(|v| v.as_str()).unwrap_or("");
+        if prompt.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("'prompt' parameter must not be empty".into()),
+            });
+        }
+
+        let context = args
+            .get("context")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
 
         // Look up agent config
         let agent_config = match self.agents.get(agent_name) {
@@ -240,6 +265,9 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("agent")));
         assert!(required.contains(&json!("prompt")));
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(schema["properties"]["agent"]["minLength"], json!(1));
+        assert_eq!(schema["properties"]["prompt"]["minLength"], json!(1));
     }
 
     #[test]
@@ -337,5 +365,44 @@ mod tests {
             .unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("Failed to create provider"));
+    }
+
+    #[tokio::test]
+    async fn blank_agent_rejected() {
+        let tool = DelegateTool::new(sample_agents(), None);
+        let result = tool
+            .execute(json!({"agent": "  ", "prompt": "test"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn blank_prompt_rejected() {
+        let tool = DelegateTool::new(sample_agents(), None);
+        let result = tool
+            .execute(json!({"agent": "researcher", "prompt": "  \t  "}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn whitespace_agent_name_not_found() {
+        let tool = DelegateTool::new(sample_agents(), None);
+        // "researcher " with trailing space — after trim becomes "researcher" which exists,
+        // but " researcher " should trim to valid agent
+        let result = tool
+            .execute(json!({"agent": " researcher ", "prompt": "test"}))
+            .await
+            .unwrap();
+        // Should still find "researcher" after trim — but will fail at provider level
+        // since ollama isn't running. The important thing is it doesn't get "Unknown agent".
+        assert!(
+            result.error.is_none()
+                || !result.error.as_deref().unwrap_or("").contains("Unknown agent")
+        );
     }
 }

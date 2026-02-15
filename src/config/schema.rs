@@ -125,7 +125,8 @@ pub struct DelegateAgentConfig {
     /// System prompt defining the agent's role and capabilities
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// Optional API key override (uses default if not set)
+    /// Optional API key override (uses default if not set).
+    /// Stored encrypted when `secrets.encrypt = true`.
     #[serde(default)]
     pub api_key: Option<String>,
     /// Temperature override (uses 0.7 if not set)
@@ -904,6 +905,19 @@ impl Config {
             // Set computed paths that are skipped during serialization
             config.config_path = config_path.clone();
             config.workspace_dir = zeroclaw_dir.join("workspace");
+
+            // Decrypt agent API keys if encryption is enabled
+            let store = crate::security::SecretStore::new(&zeroclaw_dir, config.secrets.encrypt);
+            for agent in config.agents.values_mut() {
+                if let Some(ref encrypted_key) = agent.api_key {
+                    agent.api_key = Some(
+                        store
+                            .decrypt(encrypted_key)
+                            .context("Failed to decrypt agent API key")?,
+                    );
+                }
+            }
+
             Ok(config)
         } else {
             let mut config = Config::default();
@@ -974,7 +988,27 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<()> {
-        let toml_str = toml::to_string_pretty(self).context("Failed to serialize config")?;
+        // Encrypt agent API keys before serialization
+        let mut config_to_save = self.clone();
+        let zeroclaw_dir = self
+            .config_path
+            .parent()
+            .context("Config path must have a parent directory")?;
+        let store = crate::security::SecretStore::new(zeroclaw_dir, self.secrets.encrypt);
+        for agent in config_to_save.agents.values_mut() {
+            if let Some(ref plaintext_key) = agent.api_key {
+                if !crate::security::SecretStore::is_encrypted(plaintext_key) {
+                    agent.api_key = Some(
+                        store
+                            .encrypt(plaintext_key)
+                            .context("Failed to encrypt agent API key")?,
+                    );
+                }
+            }
+        }
+
+        let toml_str =
+            toml::to_string_pretty(&config_to_save).context("Failed to serialize config")?;
 
         let parent_dir = self
             .config_path
@@ -1059,6 +1093,7 @@ fn sync_directory(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     // ── Defaults ─────────────────────────────────────────────
 
@@ -2090,5 +2125,99 @@ temperature = 0.3
         let fast = &parsed["fast"];
         assert_eq!(fast.api_key.as_deref(), Some("gsk-test-key"));
         assert!((fast.temperature.unwrap() - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn agent_api_key_encrypted_on_save_and_decrypted_on_load() {
+        let tmp = TempDir::new().unwrap();
+        let zeroclaw_dir = tmp.path();
+        let config_path = zeroclaw_dir.join("config.toml");
+
+        // Create a config with a plaintext agent API key
+        let mut agents = HashMap::new();
+        agents.insert(
+            "test_agent".to_string(),
+            DelegateAgentConfig {
+                provider: "openrouter".to_string(),
+                model: "test-model".to_string(),
+                system_prompt: None,
+                api_key: Some("sk-super-secret".to_string()),
+                temperature: None,
+                max_depth: 3,
+            },
+        );
+        let mut config = Config {
+            config_path: config_path.clone(),
+            workspace_dir: zeroclaw_dir.join("workspace"),
+            secrets: SecretsConfig { encrypt: true },
+            agents,
+            ..Config::default()
+        };
+        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        config.save().unwrap();
+
+        // Read the raw TOML and verify the key is encrypted (not plaintext)
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !raw.contains("sk-super-secret"),
+            "Plaintext API key should not appear in saved config"
+        );
+        assert!(
+            raw.contains("enc2:"),
+            "Encrypted key should use enc2: prefix"
+        );
+
+        // Parse and decrypt — simulate load_or_init by reading + decrypting
+        let store = crate::security::SecretStore::new(zeroclaw_dir, true);
+        let mut loaded: Config = toml::from_str(&raw).unwrap();
+        for agent in loaded.agents.values_mut() {
+            if let Some(ref encrypted_key) = agent.api_key {
+                agent.api_key = Some(store.decrypt(encrypted_key).unwrap());
+            }
+        }
+        assert_eq!(
+            loaded.agents["test_agent"].api_key.as_deref(),
+            Some("sk-super-secret"),
+            "Decrypted key should match original"
+        );
+    }
+
+    #[test]
+    fn agent_api_key_not_encrypted_when_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let zeroclaw_dir = tmp.path();
+        let config_path = zeroclaw_dir.join("config.toml");
+
+        let mut agents = HashMap::new();
+        agents.insert(
+            "test_agent".to_string(),
+            DelegateAgentConfig {
+                provider: "openrouter".to_string(),
+                model: "test-model".to_string(),
+                system_prompt: None,
+                api_key: Some("sk-plaintext-ok".to_string()),
+                temperature: None,
+                max_depth: 3,
+            },
+        );
+        let config = Config {
+            config_path: config_path.clone(),
+            workspace_dir: zeroclaw_dir.join("workspace"),
+            secrets: SecretsConfig { encrypt: false },
+            agents,
+            ..Config::default()
+        };
+        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        config.save().unwrap();
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            raw.contains("sk-plaintext-ok"),
+            "With encryption disabled, key should remain plaintext"
+        );
+        assert!(
+            !raw.contains("enc2:"),
+            "No encryption prefix when disabled"
+        );
     }
 }
