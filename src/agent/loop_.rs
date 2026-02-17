@@ -749,6 +749,7 @@ pub async fn run(
     let provider: Box<dyn Provider> = providers::create_routed_provider(
         provider_name,
         config.api_key.as_deref(),
+        config.api_url.as_deref(),
         &config.reliability,
         &config.model_routes,
         model_name,
@@ -1048,6 +1049,7 @@ pub async fn run(
     observer.record_event(&ObserverEvent::AgentEnd {
         duration,
         tokens_used: None,
+        cost_usd: None,
     });
 
     Ok(final_output)
@@ -1104,6 +1106,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     let provider: Box<dyn Provider> = providers::create_routed_provider(
         provider_name,
         config.api_key.as_deref(),
+        config.api_url.as_deref(),
         &config.reliability,
         &config.model_routes,
         &model_name,

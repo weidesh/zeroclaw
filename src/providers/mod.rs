@@ -104,12 +104,9 @@ pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::E
 ///
 /// For Anthropic, the provider-specific env var is `ANTHROPIC_OAUTH_TOKEN` (for setup-tokens)
 /// followed by `ANTHROPIC_API_KEY` (for regular API keys).
-fn resolve_provider_credential(name: &str, credential_override: Option<&str>) -> Option<String> {
-    if let Some(raw_override) = credential_override {
-        let trimmed_override = raw_override.trim();
-        if !trimmed_override.is_empty() {
-            return Some(trimmed_override.to_owned());
-        }
+fn resolve_api_key(name: &str, api_key: Option<&str>) -> Option<String> {
+    if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        return Some(key.to_string());
     }
 
     let provider_env_candidates: Vec<&str> = match name {
@@ -185,23 +182,27 @@ fn parse_custom_provider_url(
     }
 }
 
-/// Factory: create the right provider from config
+/// Factory: create the right provider from config (without custom URL)
+pub fn create_provider(name: &str, api_key: Option<&str>) -> anyhow::Result<Box<dyn Provider>> {
+    create_provider_with_url(name, api_key, None)
+}
+
+/// Factory: create the right provider from config with optional custom base URL
 #[allow(clippy::too_many_lines)]
-pub fn create_provider(
+pub fn create_provider_with_url(
     name: &str,
-    credential_override: Option<&str>,
+    api_key: Option<&str>,
+    api_url: Option<&str>,
 ) -> anyhow::Result<Box<dyn Provider>> {
-    let resolved_credential = resolve_provider_credential(name, credential_override);
-    #[allow(clippy::option_as_ref_deref)]
-    let key = resolved_credential.as_ref().map(String::as_str);
+    let resolved_key = resolve_api_key(name, api_key);
+    let key = resolved_key.as_deref();
     match name {
         // ── Primary providers (custom implementations) ───────
         "openrouter" => Ok(Box::new(openrouter::OpenRouterProvider::new(key))),
         "anthropic" => Ok(Box::new(anthropic::AnthropicProvider::new(key))),
         "openai" => Ok(Box::new(openai::OpenAiProvider::new(key))),
-        // Ollama is a local service that doesn't use API keys.
-        // The api_key parameter is ignored to avoid it being misinterpreted as a base_url.
-        "ollama" => Ok(Box::new(ollama::OllamaProvider::new(None))),
+        // Ollama uses api_url for custom base URL (e.g. remote Ollama instance)
+        "ollama" => Ok(Box::new(ollama::OllamaProvider::new(api_url))),
         "gemini" | "google" | "google-gemini" => {
             Ok(Box::new(gemini::GeminiProvider::new(key)))
         }
@@ -332,14 +333,15 @@ pub fn create_provider(
 /// Create provider chain with retry and fallback behavior.
 pub fn create_resilient_provider(
     primary_name: &str,
-    credential_override: Option<&str>,
+    api_key: Option<&str>,
+    api_url: Option<&str>,
     reliability: &crate::config::ReliabilityConfig,
 ) -> anyhow::Result<Box<dyn Provider>> {
     let mut providers: Vec<(String, Box<dyn Provider>)> = Vec::new();
 
     providers.push((
         primary_name.to_string(),
-        create_provider(primary_name, credential_override)?,
+        create_provider_with_url(primary_name, api_key, api_url)?,
     ));
 
     for fallback in &reliability.fallback_providers {
@@ -347,12 +349,22 @@ pub fn create_resilient_provider(
             continue;
         }
 
-        match create_provider(fallback, credential_override) {
+        if api_key.is_some() && fallback != "ollama" {
+            tracing::warn!(
+                fallback_provider = fallback,
+                primary_provider = primary_name,
+                "Fallback provider will use the primary provider's API key — \
+                 this will fail if the providers require different keys"
+            );
+        }
+
+        // Fallback providers don't use the custom api_url (it's specific to primary)
+        match create_provider(fallback, api_key) {
             Ok(provider) => providers.push((fallback.clone(), provider)),
-            Err(_error) => {
+            Err(e) => {
                 tracing::warn!(
                     fallback_provider = fallback,
-                    "Ignoring invalid fallback provider during initialization"
+                    "Ignoring invalid fallback provider: {e}"
                 );
             }
         }
@@ -374,13 +386,14 @@ pub fn create_resilient_provider(
 /// each with its own retry/fallback chain.
 pub fn create_routed_provider(
     primary_name: &str,
-    credential_override: Option<&str>,
+    api_key: Option<&str>,
+    api_url: Option<&str>,
     reliability: &crate::config::ReliabilityConfig,
     model_routes: &[crate::config::ModelRouteConfig],
     default_model: &str,
 ) -> anyhow::Result<Box<dyn Provider>> {
     if model_routes.is_empty() {
-        return create_resilient_provider(primary_name, credential_override, reliability);
+        return create_resilient_provider(primary_name, api_key, api_url, reliability);
     }
 
     // Collect unique provider names needed
@@ -403,8 +416,10 @@ pub fn create_routed_provider(
                     (!trimmed_key.is_empty()).then_some(trimmed_key)
                 })
             });
-        let key = routed_credential.or(credential_override);
-        match create_resilient_provider(name, key, reliability) {
+        let key = routed_credential.or(api_key);
+        // Only use api_url for the primary provider
+        let url = if name == primary_name { api_url } else { None };
+        match create_resilient_provider(name, key, url, reliability) {
             Ok(provider) => providers.push((name.clone(), provider)),
             Err(e) => {
                 if name == primary_name {
@@ -444,27 +459,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_provider_credential_prefers_explicit_argument() {
-        let resolved = resolve_provider_credential("openrouter", Some("  explicit-key  "));
-        assert_eq!(resolved, Some("explicit-key".to_string()));
+    fn resolve_api_key_prefers_explicit_argument() {
+        let resolved = resolve_api_key("openrouter", Some("  explicit-key  "));
+        assert_eq!(resolved.as_deref(), Some("explicit-key"));
     }
 
     // ── Primary providers ────────────────────────────────────
 
     #[test]
     fn factory_openrouter() {
-        assert!(create_provider("openrouter", Some("provider-test-credential")).is_ok());
+        assert!(create_provider("openrouter", Some("sk-test")).is_ok());
         assert!(create_provider("openrouter", None).is_ok());
     }
 
     #[test]
     fn factory_anthropic() {
-        assert!(create_provider("anthropic", Some("provider-test-credential")).is_ok());
+        assert!(create_provider("anthropic", Some("sk-test")).is_ok());
     }
 
     #[test]
     fn factory_openai() {
-        assert!(create_provider("openai", Some("provider-test-credential")).is_ok());
+        assert!(create_provider("openai", Some("sk-test")).is_ok());
     }
 
     #[test]
@@ -764,20 +779,22 @@ mod tests {
             scheduler_retries: 2,
         };
 
-        let provider =
-            create_resilient_provider("openrouter", Some("provider-test-credential"), &reliability);
+        let provider = create_resilient_provider("openrouter", Some("sk-test"), None, &reliability);
         assert!(provider.is_ok());
     }
 
     #[test]
     fn resilient_provider_errors_for_invalid_primary() {
         let reliability = crate::config::ReliabilityConfig::default();
-        let provider = create_resilient_provider(
-            "totally-invalid",
-            Some("provider-test-credential"),
-            &reliability,
-        );
+        let provider =
+            create_resilient_provider("totally-invalid", Some("sk-test"), None, &reliability);
         assert!(provider.is_err());
+    }
+
+    #[test]
+    fn ollama_with_custom_url() {
+        let provider = create_provider_with_url("ollama", None, Some("http://10.100.2.32:11434"));
+        assert!(provider.is_ok());
     }
 
     #[test]

@@ -688,16 +688,7 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     }
 
     if let Some(ref lk) = config.channels_config.lark {
-        channels.push((
-            "Lark",
-            Arc::new(LarkChannel::new(
-                lk.app_id.clone(),
-                lk.app_secret.clone(),
-                lk.verification_token.clone().unwrap_or_default(),
-                9898,
-                lk.allowed_users.clone(),
-            )),
-        ));
+        channels.push(("Lark", Arc::new(LarkChannel::from_config(lk))));
     }
 
     if let Some(ref dt) = config.channels_config.dingtalk {
@@ -762,6 +753,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider(
         &provider_name,
         config.api_key.as_deref(),
+        config.api_url.as_deref(),
         &config.reliability,
     )?);
 
@@ -962,13 +954,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
 
     if let Some(ref lk) = config.channels_config.lark {
-        channels.push(Arc::new(LarkChannel::new(
-            lk.app_id.clone(),
-            lk.app_secret.clone(),
-            lk.verification_token.clone().unwrap_or_default(),
-            9898,
-            lk.allowed_users.clone(),
-        )));
+        channels.push(Arc::new(LarkChannel::from_config(lk)));
     }
 
     if let Some(ref dt) = config.channels_config.dingtalk {

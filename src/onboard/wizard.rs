@@ -106,6 +106,7 @@ pub fn run_wizard() -> Result<Config> {
         } else {
             Some(api_key)
         },
+        api_url: None,
         default_provider: Some(provider),
         default_model: Some(model),
         default_temperature: 0.7,
@@ -284,7 +285,7 @@ fn memory_config_defaults_for_backend(backend: &str) -> MemoryConfig {
 
 #[allow(clippy::too_many_lines)]
 pub fn run_quick_setup(
-    credential_override: Option<&str>,
+    api_key: Option<&str>,
     provider: Option<&str>,
     memory_backend: Option<&str>,
 ) -> Result<Config> {
@@ -318,7 +319,8 @@ pub fn run_quick_setup(
     let config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
-        api_key: credential_override.map(String::from),
+        api_key: api_key.map(String::from),
+        api_url: None,
         default_provider: Some(provider_name.clone()),
         default_model: Some(model.clone()),
         default_temperature: 0.7,
@@ -377,7 +379,7 @@ pub fn run_quick_setup(
     println!(
         "  {} API Key:    {}",
         style("✓").green().bold(),
-        if credential_override.is_some() {
+        if api_key.is_some() {
             style("set").green()
         } else {
             style("not set (use --api-key or edit config.toml)").yellow()
@@ -426,7 +428,7 @@ pub fn run_quick_setup(
     );
     println!();
     println!("  {}", style("Next steps:").white().bold());
-    if credential_override.is_none() {
+    if api_key.is_none() {
         println!("    1. Set your API key:  export OPENROUTER_API_KEY=\"sk-...\"");
         println!("    2. Or edit:           ~/.zeroclaw/config.toml");
         println!("    3. Chat:              zeroclaw agent -m \"Hello!\"");
@@ -2799,14 +2801,22 @@ fn setup_channels() -> Result<ChannelsConfig> {
                         .header("Authorization", format!("Bearer {access_token_clone}"))
                         .send()?;
                     let ok = resp.status().is_success();
-                    Ok::<_, reqwest::Error>(ok)
+                    let data: serde_json::Value = resp.json().unwrap_or_default();
+                    let user_id = data
+                        .get("user_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    Ok::<_, reqwest::Error>((ok, user_id))
                 })
                 .join();
                 match thread_result {
-                    Ok(Ok(true)) => println!(
-                        "\r  {} Connection verified        ",
-                        style("✅").green().bold()
-                    ),
+                    Ok(Ok((true, user_id))) => {
+                        println!(
+                            "\r  {} Connected as {user_id}        ",
+                            style("✅").green().bold()
+                        );
+                    }
                     _ => {
                         println!(
                             "\r  {} Connection failed — check homeserver URL and token",
@@ -3771,7 +3781,15 @@ fn print_summary(config: &Config) {
     );
 
     // Secrets
-    println!("    {} Secrets:       configured", style("🔒").cyan());
+    println!(
+        "    {} Secrets:       {}",
+        style("🔒").cyan(),
+        if config.secrets.encrypt {
+            style("encrypted").green().to_string()
+        } else {
+            style("plaintext").yellow().to_string()
+        }
+    );
 
     // Gateway
     println!(
