@@ -1078,24 +1078,50 @@ impl OpenAiCompatibleProvider {
     }
 
     fn is_native_tool_schema_unsupported(status: reqwest::StatusCode, error: &str) -> bool {
-        if !matches!(
+        // 400/422 errors with tool-related hints
+        if matches!(
             status,
             reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
         ) {
-            return false;
+            let lower = error.to_lowercase();
+            let hints = [
+                "unknown parameter: tools",
+                "unsupported parameter: tools",
+                "unrecognized field `tools`",
+                "does not support tools",
+                "function calling is not supported",
+                "tool_choice",
+            ];
+            if hints.iter().any(|hint| lower.contains(hint)) {
+                return true;
+            }
         }
 
-        let lower = error.to_lowercase();
-        [
-            "unknown parameter: tools",
-            "unsupported parameter: tools",
-            "unrecognized field `tools`",
-            "does not support tools",
-            "function calling is not supported",
-            "tool_choice",
-        ]
-        .iter()
-        .any(|hint| lower.contains(hint))
+        // 5xx errors with JSON mapper / tool schema parsing errors
+        // These indicate the provider received the request but failed to parse
+        // the native tool schema, suggesting incompatibility with native tools.
+        // Example: HTTP 516 with "Json mapper error!: msg=Unrecognized token..."
+        if status.is_server_error() {
+            let lower = error.to_lowercase();
+            let json_mapper_hints = [
+                "json mapper error",
+                "unrecognized token",
+                "was expecting",
+                "json parse error",
+                "parsing error",
+                "failed to parse",
+                "invalid json",
+            ];
+            if json_mapper_hints.iter().any(|hint| lower.contains(hint)) {
+                tracing::warn!(
+                    status = %status,
+                    "Provider returned server error with JSON parsing hints, treating as native tools incompatibility"
+                );
+                return true;
+            }
+        }
+
+        false
     }
 }
 
@@ -2281,6 +2307,46 @@ mod tests {
             !OpenAiCompatibleProvider::is_native_tool_schema_unsupported(
                 reqwest::StatusCode::UNAUTHORIZED,
                 "unknown parameter: tools"
+            )
+        );
+    }
+
+    #[test]
+    fn native_tool_schema_unsupported_detects_5xx_json_mapper_errors() {
+        // HTTP 516 with JSON mapper error (issue #1428)
+        assert!(OpenAiCompatibleProvider::is_native_tool_schema_unsupported(
+            reqwest::StatusCode::from_u16(516).unwrap(),
+            "Engine unexpected error!: inference failed, msg=Json mapper error!: msg=Unrecognized token 'Internal': was expecting (JSON String"
+        ));
+
+        // HTTP 500 with JSON parse error
+        assert!(OpenAiCompatibleProvider::is_native_tool_schema_unsupported(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to parse request: invalid json in tools field"
+        ));
+
+        // HTTP 502 with parsing error
+        assert!(OpenAiCompatibleProvider::is_native_tool_schema_unsupported(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "was expecting JSON object but got array"
+        ));
+    }
+
+    #[test]
+    fn native_tool_schema_unsupported_ignores_5xx_without_json_hints() {
+        // HTTP 500 with generic server error should NOT trigger fallback
+        assert!(
+            !OpenAiCompatibleProvider::is_native_tool_schema_unsupported(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error, please try again later"
+            )
+        );
+
+        // HTTP 503 service unavailable should NOT trigger fallback
+        assert!(
+            !OpenAiCompatibleProvider::is_native_tool_schema_unsupported(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "Service temporarily unavailable"
             )
         );
     }
