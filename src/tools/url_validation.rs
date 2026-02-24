@@ -1,56 +1,20 @@
-use anyhow::Result;
+//! Shared URL validation utilities for SSRF protection.
+//!
+//! This module consolidates URL validation logic used across multiple tools:
+//! - `web_fetch`: HTTP/HTTPS GET requests with HTML-to-text conversion
+//! - `http_request`: Generic HTTP client for API interactions
+//! - `browser_open`: HTTPS-only URL opening in Brave Browser
+//!
+//! All tools enforce the same security constraints:
+//! - Allowlist-only domains (with wildcard `*` and `*.domain.com` patterns)
+//! - Block private/local hosts (localhost, RFC 1918, link-local, etc.)
+//! - No userinfo in URLs
+//! - No IPv6 literal hosts
 
-#[derive(Debug, Clone, Copy)]
-pub enum UrlSchemePolicy {
-    HttpsOnly,
-    HttpOrHttps,
-}
-
-#[derive(Debug, Clone)]
-pub struct DomainPolicy<'a> {
-    pub allowed_domains: &'a [String],
-    pub blocked_domains: &'a [String],
-    pub allowed_field_name: &'a str,
-    pub blocked_field_name: Option<&'a str>,
-    pub empty_allowed_message: &'a str,
-    pub scheme_policy: UrlSchemePolicy,
-    pub ipv6_error_context: &'a str,
-}
-
-pub fn validate_url(raw_url: &str, policy: &DomainPolicy<'_>) -> Result<String> {
-    let url = raw_url.trim();
-
-    if url.is_empty() {
-        anyhow::bail!("URL cannot be empty");
-    }
-
-    if url.chars().any(char::is_whitespace) {
-        anyhow::bail!("URL cannot contain whitespace");
-    }
-
-    if policy.allowed_domains.is_empty() {
-        anyhow::bail!("{}", policy.empty_allowed_message);
-    }
-
-    let host = extract_host(url, policy.scheme_policy, policy.ipv6_error_context)?;
-
-    if is_private_or_local_host(&host) {
-        anyhow::bail!("Blocked local/private host: {host}");
-    }
-
-    if let Some(blocked_field_name) = policy.blocked_field_name {
-        if host_matches_allowlist(&host, policy.blocked_domains) {
-            anyhow::bail!("Host '{host}' is in {blocked_field_name}");
-        }
-    }
-
-    if !host_matches_allowlist(&host, policy.allowed_domains) {
-        anyhow::bail!("Host '{host}' is not in {}", policy.allowed_field_name);
-    }
-
-    Ok(url.to_string())
-}
-
+/// Normalizes and deduplicates a list of allowed/blocked domains.
+///
+/// Each domain is normalized via [`normalize_domain`] before comparison.
+/// The result is sorted and deduplicated.
 pub fn normalize_allowed_domains(domains: Vec<String>) -> Vec<String> {
     let mut normalized = domains
         .into_iter()
@@ -61,6 +25,15 @@ pub fn normalize_allowed_domains(domains: Vec<String>) -> Vec<String> {
     normalized
 }
 
+/// Normalizes a single domain string.
+///
+/// - Trims whitespace and converts to lowercase
+/// - Strips `http://` or `https://` prefixes
+/// - Strips path components (e.g., `/path` -> removed)
+/// - Strips port numbers
+/// - Strips leading/trailing dots
+///
+/// Returns `None` if the result is empty or contains whitespace.
 pub fn normalize_domain(raw: &str) -> Option<String> {
     let mut d = raw.trim().to_lowercase();
     if d.is_empty() {
@@ -90,16 +63,44 @@ pub fn normalize_domain(raw: &str) -> Option<String> {
     Some(d)
 }
 
-pub fn extract_host(
-    url: &str,
-    scheme_policy: UrlSchemePolicy,
-    ipv6_error_context: &str,
-) -> anyhow::Result<String> {
-    let rest = match scheme_policy {
-        UrlSchemePolicy::HttpsOnly => url
+/// URL scheme constraint for validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemeConstraint {
+    /// Only HTTPS URLs are allowed (e.g., browser_open)
+    HttpsOnly,
+    /// Both HTTP and HTTPS URLs are allowed (e.g., web_fetch, http_request)
+    HttpOrHttps,
+}
+
+/// Validates a URL and extracts its host component.
+///
+/// # Arguments
+/// * `raw_url` - The URL to validate
+/// * `scheme_constraint` - Whether to require HTTPS only or allow both HTTP/HTTPS
+///
+/// # Errors
+/// Returns an error if:
+/// - URL is empty or contains whitespace
+/// - URL scheme doesn't match the constraint
+/// - URL contains userinfo (e.g., `user@host`)
+/// - URL uses IPv6 literal notation (e.g., `[::1]`)
+/// - URL doesn't have a valid host
+pub fn extract_host(raw_url: &str, scheme_constraint: SchemeConstraint) -> anyhow::Result<String> {
+    let url = raw_url.trim();
+
+    if url.is_empty() {
+        anyhow::bail!("URL cannot be empty");
+    }
+
+    if url.chars().any(char::is_whitespace) {
+        anyhow::bail!("URL cannot contain whitespace");
+    }
+
+    let rest = match scheme_constraint {
+        SchemeConstraint::HttpsOnly => url
             .strip_prefix("https://")
             .ok_or_else(|| anyhow::anyhow!("Only https:// URLs are allowed"))?,
-        UrlSchemePolicy::HttpOrHttps => url
+        SchemeConstraint::HttpOrHttps => url
             .strip_prefix("http://")
             .or_else(|| url.strip_prefix("https://"))
             .ok_or_else(|| anyhow::anyhow!("Only http:// and https:// URLs are allowed"))?,
@@ -119,7 +120,7 @@ pub fn extract_host(
     }
 
     if authority.starts_with('[') {
-        anyhow::bail!("IPv6 hosts are not supported in {ipv6_error_context}");
+        anyhow::bail!("IPv6 hosts are not supported");
     }
 
     let host = authority
@@ -137,35 +138,69 @@ pub fn extract_host(
     Ok(host)
 }
 
+/// Checks if a host matches any pattern in the allowlist.
+///
+/// Supports three pattern types:
+/// - `*` - matches all hosts (but still subject to SSRF protection)
+/// - `*.example.com` - matches the domain and all subdomains
+/// - `example.com` - matches the exact domain and its subdomains
 pub fn host_matches_allowlist(host: &str, allowed_domains: &[String]) -> bool {
     allowed_domains.iter().any(|pattern| {
         if pattern == "*" {
             return true;
         }
-
-        if let Some(suffix) = pattern.strip_prefix("*.") {
-            return host == suffix || host.ends_with(&format!(".{suffix}"));
+        if pattern.starts_with("*.") {
+            let suffix = &pattern[1..]; // ".example.com"
+            host.ends_with(suffix) || host == &pattern[2..]
+        } else {
+            host == pattern || host.ends_with(&format!(".{pattern}"))
         }
-
-        host == pattern || host.ends_with(&format!(".{pattern}"))
     })
 }
 
+/// Checks if a host is a private or local address that should be blocked for SSRF protection.
+///
+/// Blocks:
+/// - `localhost` and `*.localhost`
+/// - `*.local` TLD
+/// - IPv4 loopback (127.0.0.0/8)
+/// - IPv4 private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+/// - IPv4 link-local (169.254.0.0/16)
+/// - IPv4 unspecified (0.0.0.0)
+/// - IPv4 broadcast (255.255.255.255)
+/// - IPv4 multicast (224.0.0.0/4)
+/// - IPv4 shared address space (100.64.0.0/10, RFC 6598)
+/// - IPv4 reserved (240.0.0.0/4)
+/// - IPv4 documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24)
+/// - IPv4 benchmarking (198.18.0.0/15)
+/// - IPv4 IETF assignments (192.0.0.0/24)
+/// - IPv6 loopback (::1)
+/// - IPv6 unspecified (::)
+/// - IPv6 multicast (ff00::/8)
+/// - IPv6 unique-local (fc00::/7)
+/// - IPv6 link-local (fe80::/10)
+/// - IPv6 documentation (2001:db8::/32)
+/// - IPv4-mapped IPv6 addresses with private IPv4
 pub fn is_private_or_local_host(host: &str) -> bool {
+    // Strip brackets from IPv6 addresses like [::1]
     let bare = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
 
-    let has_local_tld = bare
+    // Normalize to lowercase for string comparisons
+    let bare_lower = bare.to_lowercase();
+
+    let has_local_tld = bare_lower
         .rsplit('.')
         .next()
         .is_some_and(|label| label == "local");
 
-    if bare == "localhost" || bare.ends_with(".localhost") || has_local_tld {
+    if bare_lower == "localhost" || bare_lower.ends_with(".localhost") || has_local_tld {
         return true;
     }
 
+    // Use original bare for IP parsing (case doesn't matter for IP addresses)
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
         return match ip {
             std::net::IpAddr::V4(v4) => is_non_global_v4(v4),
@@ -176,30 +211,32 @@ pub fn is_private_or_local_host(host: &str) -> bool {
     false
 }
 
-fn is_non_global_v4(v4: std::net::Ipv4Addr) -> bool {
+/// Returns true if the IPv4 address is not globally routable.
+pub fn is_non_global_v4(v4: std::net::Ipv4Addr) -> bool {
     let [a, b, c, _] = v4.octets();
-    v4.is_loopback()
-        || v4.is_private()
-        || v4.is_link_local()
-        || v4.is_unspecified()
-        || v4.is_broadcast()
-        || v4.is_multicast()
-        || (a == 100 && (64..=127).contains(&b))
-        || a >= 240
-        || (a == 192 && b == 0 && (c == 0 || c == 2))
-        || (a == 198 && b == 51)
-        || (a == 203 && b == 0)
-        || (a == 198 && (18..=19).contains(&b))
+    v4.is_loopback() // 127.0.0.0/8
+        || v4.is_private() // 10/8, 172.16/12, 192.168/16
+        || v4.is_link_local() // 169.254.0.0/16
+        || v4.is_unspecified() // 0.0.0.0
+        || v4.is_broadcast() // 255.255.255.255
+        || v4.is_multicast() // 224.0.0.0/4
+        || (a == 100 && (64..=127).contains(&b)) // Shared address space (RFC 6598)
+        || a >= 240 // Reserved (240.0.0.0/4, except broadcast)
+        || (a == 192 && b == 0 && (c == 0 || c == 2)) // IETF assignments + TEST-NET-1
+        || (a == 198 && b == 51) // Documentation (198.51.100.0/24)
+        || (a == 203 && b == 0) // Documentation (203.0.113.0/24)
+        || (a == 198 && (18..=19).contains(&b)) // Benchmarking (198.18.0.0/15)
 }
 
-fn is_non_global_v6(v6: std::net::Ipv6Addr) -> bool {
+/// Returns true if the IPv6 address is not globally routable.
+pub fn is_non_global_v6(v6: std::net::Ipv6Addr) -> bool {
     let segs = v6.segments();
-    v6.is_loopback()
-        || v6.is_unspecified()
-        || v6.is_multicast()
-        || (segs[0] & 0xfe00) == 0xfc00
-        || (segs[0] & 0xffc0) == 0xfe80
-        || (segs[0] == 0x2001 && segs[1] == 0x0db8)
+    v6.is_loopback() // ::1
+        || v6.is_unspecified() // ::
+        || v6.is_multicast() // ff00::/8
+        || (segs[0] & 0xfe00) == 0xfc00 // Unique-local (fc00::/7)
+        || (segs[0] & 0xffc0) == 0xfe80 // Link-local (fe80::/10)
+        || (segs[0] == 0x2001 && segs[1] == 0x0db8) // Documentation (2001:db8::/32)
         || v6.to_ipv4_mapped().is_some_and(is_non_global_v4)
 }
 
@@ -207,15 +244,12 @@ fn is_non_global_v6(v6: std::net::Ipv6Addr) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn normalize_domain_strips_scheme_and_path() {
-        let got = normalize_domain("https://Docs.Example.com/path").unwrap();
-        assert_eq!(got, "docs.example.com");
-    }
+    // ── Domain normalization ─────────────────────────────────────
 
     #[test]
-    fn normalize_domain_rejects_whitespace() {
-        assert!(normalize_domain("exa mple.com").is_none());
+    fn normalize_domain_strips_scheme_path_and_case() {
+        let got = normalize_domain("  HTTPS://Docs.Example.com/path ").unwrap();
+        assert_eq!(got, "docs.example.com");
     }
 
     #[test]
@@ -229,175 +263,309 @@ mod tests {
     }
 
     #[test]
-    fn host_matches_allowlist_exact() {
-        assert!(host_matches_allowlist(
-            "example.com",
-            &["example.com".into()]
-        ));
+    fn normalize_domain_strips_port() {
+        let got = normalize_domain("example.com:8080").unwrap();
+        assert_eq!(got, "example.com");
     }
 
     #[test]
-    fn host_matches_allowlist_subdomain() {
-        assert!(host_matches_allowlist(
-            "docs.example.com",
-            &["example.com".into()]
-        ));
+    fn normalize_domain_strips_dots() {
+        let got = normalize_domain(".example.com.").unwrap();
+        assert_eq!(got, "example.com");
     }
 
     #[test]
-    fn host_matches_allowlist_wildcard_pattern() {
-        assert!(host_matches_allowlist(
-            "api.example.com",
-            &["*.example.com".into()]
-        ));
-        assert!(host_matches_allowlist(
-            "example.com",
-            &["*.example.com".into()]
-        ));
+    fn normalize_domain_rejects_empty() {
+        assert!(normalize_domain("").is_none());
+        assert!(normalize_domain("   ").is_none());
     }
 
     #[test]
-    fn host_matches_allowlist_global_wildcard() {
-        assert!(host_matches_allowlist("example.net", &["*".into()]));
+    fn normalize_domain_rejects_whitespace() {
+        assert!(normalize_domain("example .com").is_none());
+    }
+
+    // ── Host extraction ──────────────────────────────────────────
+
+    #[test]
+    fn extract_host_https_only() {
+        let host = extract_host("https://example.com/path", SchemeConstraint::HttpsOnly).unwrap();
+        assert_eq!(host, "example.com");
     }
 
     #[test]
-    fn extract_host_supports_http_and_https() {
-        let host = extract_host(
-            "http://api.example.com/path",
-            UrlSchemePolicy::HttpOrHttps,
-            "http_request",
-        )
-        .unwrap();
-        assert_eq!(host, "api.example.com");
+    fn extract_host_http_or_https() {
+        let host_http =
+            extract_host("http://example.com/path", SchemeConstraint::HttpOrHttps).unwrap();
+        let host_https =
+            extract_host("https://example.com/path", SchemeConstraint::HttpOrHttps).unwrap();
+        assert_eq!(host_http, "example.com");
+        assert_eq!(host_https, "example.com");
     }
 
     #[test]
-    fn extract_host_rejects_non_https_when_https_only() {
+    fn extract_host_rejects_http_when_https_only() {
+        let err = extract_host("http://example.com", SchemeConstraint::HttpsOnly)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("https://"));
+    }
+
+    #[test]
+    fn extract_host_rejects_empty_url() {
+        let err = extract_host("", SchemeConstraint::HttpOrHttps)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn extract_host_rejects_whitespace_url() {
         let err = extract_host(
-            "http://example.com",
-            UrlSchemePolicy::HttpsOnly,
-            "browser_open",
+            "https://example.com/hello world",
+            SchemeConstraint::HttpsOnly,
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("Only https://"));
+        assert!(err.contains("whitespace"));
     }
 
     #[test]
     fn extract_host_rejects_userinfo() {
-        let err = extract_host(
-            "https://user@example.com",
-            UrlSchemePolicy::HttpsOnly,
-            "browser_open",
-        )
-        .unwrap_err()
-        .to_string();
+        let err = extract_host("https://user@example.com", SchemeConstraint::HttpsOnly)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("userinfo"));
     }
 
     #[test]
-    fn extract_host_rejects_ipv6_literal() {
-        let err = extract_host(
-            "https://[::1]:8443",
-            UrlSchemePolicy::HttpsOnly,
-            "browser_open",
-        )
-        .unwrap_err()
-        .to_string();
+    fn extract_host_rejects_ipv6() {
+        let err = extract_host("https://[::1]:8080/path", SchemeConstraint::HttpsOnly)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("IPv6"));
     }
 
     #[test]
-    fn private_host_detection_localhost() {
-        assert!(is_private_or_local_host("localhost"));
-        assert!(is_private_or_local_host("api.localhost"));
+    fn extract_host_strips_port() {
+        let host = extract_host("https://example.com:8080", SchemeConstraint::HttpsOnly).unwrap();
+        assert_eq!(host, "example.com");
     }
 
     #[test]
-    fn private_host_detection_private_ipv4() {
+    fn extract_host_lowercases() {
+        let host = extract_host("https://EXAMPLE.COM", SchemeConstraint::HttpsOnly).unwrap();
+        assert_eq!(host, "example.com");
+    }
+
+    // ── Allowlist matching ───────────────────────────────────────
+
+    #[test]
+    fn allowlist_matches_wildcard() {
+        assert!(host_matches_allowlist("any.host", &["*".into()]));
+    }
+
+    #[test]
+    fn allowlist_matches_exact_domain() {
+        assert!(host_matches_allowlist(
+            "example.com",
+            &["example.com".into()]
+        ));
+        assert!(!host_matches_allowlist(
+            "other.com",
+            &["example.com".into()]
+        ));
+    }
+
+    #[test]
+    fn allowlist_matches_subdomain() {
+        assert!(host_matches_allowlist(
+            "api.example.com",
+            &["example.com".into()]
+        ));
+        assert!(host_matches_allowlist(
+            "deep.api.example.com",
+            &["example.com".into()]
+        ));
+    }
+
+    #[test]
+    fn allowlist_matches_wildcard_pattern() {
+        assert!(host_matches_allowlist(
+            "example.com",
+            &["*.example.com".into()]
+        ));
+        assert!(host_matches_allowlist(
+            "api.example.com",
+            &["*.example.com".into()]
+        ));
+        assert!(!host_matches_allowlist(
+            "other.com",
+            &["*.example.com".into()]
+        ));
+    }
+
+    // ── SSRF protection ──────────────────────────────────────────
+
+    #[test]
+    fn ssrf_blocks_localhost() {
+        assert!(is_private_or_local_host("localhost"));
+        assert!(is_private_or_local_host("LOCALHOST"));
+    }
+
+    #[test]
+    fn ssrf_blocks_localhost_subdomain() {
+        assert!(is_private_or_local_host("evil.localhost"));
+        assert!(is_private_or_local_host("a.b.localhost"));
+    }
+
+    #[test]
+    fn ssrf_blocks_local_tld() {
+        assert!(is_private_or_local_host("service.local"));
+        assert!(is_private_or_local_host("host.local"));
+    }
+
+    #[test]
+    fn ssrf_blocks_loopback_ipv4() {
+        assert!(is_private_or_local_host("127.0.0.1"));
+        assert!(is_private_or_local_host("127.0.0.2"));
+        assert!(is_private_or_local_host("127.255.255.255"));
+    }
+
+    #[test]
+    fn ssrf_blocks_rfc1918() {
         assert!(is_private_or_local_host("10.0.0.1"));
         assert!(is_private_or_local_host("172.16.0.1"));
-        assert!(is_private_or_local_host("192.168.1.5"));
+        assert!(is_private_or_local_host("192.168.1.1"));
     }
 
     #[test]
-    fn private_host_detection_public_ipv4() {
-        assert!(!is_private_or_local_host("8.8.8.8"));
+    fn ssrf_blocks_link_local() {
+        assert!(is_private_or_local_host("169.254.0.1"));
+        assert!(is_private_or_local_host("169.254.255.255"));
     }
 
     #[test]
-    fn private_host_detection_ipv6_local() {
+    fn ssrf_blocks_unspecified() {
+        assert!(is_private_or_local_host("0.0.0.0"));
+    }
+
+    #[test]
+    fn ssrf_blocks_broadcast() {
+        assert!(is_private_or_local_host("255.255.255.255"));
+    }
+
+    #[test]
+    fn ssrf_blocks_multicast_ipv4() {
+        assert!(is_private_or_local_host("224.0.0.1"));
+        assert!(is_private_or_local_host("239.255.255.255"));
+    }
+
+    #[test]
+    fn ssrf_blocks_shared_address_space() {
+        assert!(is_private_or_local_host("100.64.0.1"));
+        assert!(is_private_or_local_host("100.127.255.255"));
+    }
+
+    #[test]
+    fn ssrf_blocks_reserved_ipv4() {
+        assert!(is_private_or_local_host("240.0.0.1"));
+        assert!(is_private_or_local_host("250.1.2.3"));
+    }
+
+    #[test]
+    fn ssrf_blocks_documentation_ranges() {
+        assert!(is_private_or_local_host("192.0.2.1")); // TEST-NET-1
+        assert!(is_private_or_local_host("198.51.100.1")); // TEST-NET-2
+        assert!(is_private_or_local_host("203.0.113.1")); // TEST-NET-3
+    }
+
+    #[test]
+    fn ssrf_blocks_benchmarking_range() {
+        assert!(is_private_or_local_host("198.18.0.1"));
+        assert!(is_private_or_local_host("198.19.255.255"));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_loopback() {
         assert!(is_private_or_local_host("::1"));
+        assert!(is_private_or_local_host("[::1]"));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_unspecified() {
+        assert!(is_private_or_local_host("::"));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_multicast() {
+        assert!(is_private_or_local_host("ff02::1"));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_link_local() {
+        assert!(is_private_or_local_host("fe80::1"));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_unique_local() {
         assert!(is_private_or_local_host("fd00::1"));
     }
 
     #[test]
-    fn private_host_detection_ipv6_public() {
+    fn ssrf_blocks_ipv6_documentation() {
+        assert!(is_private_or_local_host("2001:db8::1"));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv4_mapped_ipv6() {
+        assert!(is_private_or_local_host("::ffff:127.0.0.1"));
+        assert!(is_private_or_local_host("::ffff:192.168.1.1"));
+        assert!(is_private_or_local_host("::ffff:10.0.0.1"));
+    }
+
+    #[test]
+    fn ssrf_allows_public_ipv4() {
+        assert!(!is_private_or_local_host("8.8.8.8"));
+        assert!(!is_private_or_local_host("1.1.1.1"));
+        assert!(!is_private_or_local_host("93.184.216.34"));
+    }
+
+    #[test]
+    fn ssrf_allows_public_ipv6() {
         assert!(!is_private_or_local_host("2607:f8b0:4004:800::200e"));
     }
 
-    fn policy<'a>(
-        allowed_domains: &'a [String],
-        blocked_domains: &'a [String],
-    ) -> DomainPolicy<'a> {
-        DomainPolicy {
-            allowed_domains,
-            blocked_domains,
-            allowed_field_name: "web_fetch.allowed_domains",
-            blocked_field_name: Some("web_fetch.blocked_domains"),
-            empty_allowed_message: "allowed domains must be configured",
-            scheme_policy: UrlSchemePolicy::HttpOrHttps,
-            ipv6_error_context: "web_fetch",
-        }
+    #[test]
+    fn ssrf_allows_public_hostname() {
+        assert!(!is_private_or_local_host("example.com"));
+        assert!(!is_private_or_local_host("www.google.com"));
+    }
+
+    // Defense-in-depth: alternate IP notations should not bypass protection
+    // Rust's IpAddr::parse() rejects these, so they fall through as hostnames.
+
+    #[test]
+    fn ssrf_octal_loopback_not_parsed_as_ip() {
+        // 0177.0.0.1 is octal for 127.0.0.1 in some languages
+        assert!(!is_private_or_local_host("0177.0.0.1"));
     }
 
     #[test]
-    fn validate_url_accepts_public_allowed_host() {
-        let allowed = vec!["example.com".to_string()];
-        let blocked: Vec<String> = Vec::new();
-        let got =
-            validate_url("https://docs.example.com/path", &policy(&allowed, &blocked)).unwrap();
-        assert_eq!(got, "https://docs.example.com/path");
+    fn ssrf_hex_loopback_not_parsed_as_ip() {
+        // 0x7f000001 is hex for 127.0.0.1 in some languages
+        assert!(!is_private_or_local_host("0x7f000001"));
     }
 
     #[test]
-    fn validate_url_rejects_blocked_host() {
-        let allowed = vec!["*".to_string()];
-        let blocked = vec!["example.com".to_string()];
-        let err = validate_url("https://example.com", &policy(&allowed, &blocked))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("blocked_domains"));
+    fn ssrf_decimal_loopback_not_parsed_as_ip() {
+        // 2130706433 is decimal for 127.0.0.1 in some languages
+        assert!(!is_private_or_local_host("2130706433"));
     }
 
     #[test]
-    fn validate_url_rejects_private_host() {
-        let allowed = vec!["*".to_string()];
-        let blocked: Vec<String> = Vec::new();
-        let err = validate_url("https://127.0.0.1", &policy(&allowed, &blocked))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("local/private"));
-    }
-
-    #[test]
-    fn validate_url_rejects_allowlist_miss() {
-        let allowed = vec!["example.com".to_string()];
-        let blocked: Vec<String> = Vec::new();
-        let err = validate_url("https://google.com", &policy(&allowed, &blocked))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("allowed_domains"));
-    }
-
-    #[test]
-    fn validate_url_rejects_empty_allowlist() {
-        let allowed: Vec<String> = Vec::new();
-        let blocked: Vec<String> = Vec::new();
-        let err = validate_url("https://example.com", &policy(&allowed, &blocked))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("allowed domains must be configured"));
+    fn ssrf_zero_padded_loopback_not_parsed_as_ip() {
+        // 127.000.000.001 uses zero-padded octets
+        assert!(!is_private_or_local_host("127.000.000.001"));
     }
 }
