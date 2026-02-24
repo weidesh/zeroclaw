@@ -29,3 +29,10 @@
 - 配置参考：[config-reference.md](config-reference.md)
 - 运维 Runbook：[operations-runbook.md](operations-runbook.md)
 - 故障排查：[troubleshooting.md](troubleshooting.md)
+
+## 治理与索引
+
+- 文档总清单：[docs-inventory.md](docs-inventory.md)
+- i18n 指南：[i18n-guide.md](i18n-guide.md)
+- 覆盖状态：[i18n-coverage.md](i18n-coverage.md)
+- 缺口追踪：[i18n-gap-backlog.md](i18n-gap-backlog.md)

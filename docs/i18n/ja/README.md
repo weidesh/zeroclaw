@@ -22,6 +22,15 @@
 - 運用ランブック: [operations-runbook.md](operations-runbook.md)
 - トラブルシューティング: [troubleshooting.md](troubleshooting.md)
 
+現状: **top-level ドキュメント parity 完了**（40/40）。
+
+## 全体インデックスとガバナンス
+
+- ローカル文書インベントリ: [docs-inventory.md](docs-inventory.md)
+- i18n 実行ガイド: [i18n-guide.md](i18n-guide.md)
+- i18n カバレッジ: [i18n-coverage.md](i18n-coverage.md)
+- i18n ギャップ管理: [i18n-gap-backlog.md](i18n-gap-backlog.md)
+
 ## カテゴリ
 
 - はじめに: [../../getting-started/README.md](../../getting-started/README.md)

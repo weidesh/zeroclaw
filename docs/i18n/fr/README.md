@@ -22,6 +22,15 @@ Dernière mise à jour : **24 février 2026**.
 - Runbook d'exploitation : [operations-runbook.md](operations-runbook.md)
 - Dépannage : [troubleshooting.md](troubleshooting.md)
 
+État actuel : **parité top-level terminée** (40/40).
+
+## Index complet et gouvernance
+
+- Inventaire documentaire local : [docs-inventory.md](docs-inventory.md)
+- Guide d'exécution i18n : [i18n-guide.md](i18n-guide.md)
+- Couverture i18n : [i18n-coverage.md](i18n-coverage.md)
+- Suivi des écarts i18n : [i18n-gap-backlog.md](i18n-gap-backlog.md)
+
 ## Catégories
 
 - Démarrage : [../../getting-started/README.md](../../getting-started/README.md)

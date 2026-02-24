@@ -1,6 +1,6 @@
 # i18n Gap Backlog
 
-This file tracks remaining localization depth gaps after the 2026-02-24 deep docs cleanup.
+This file tracks localization parity gaps and closure state.
 
 Last updated: **2026-02-24**.
 
@@ -12,68 +12,40 @@ Gap baseline = top-level English docs set under `docs/*.md` (excluding README/SU
 
 | Locale | Missing top-level docs parity count | Current status |
 |---|---:|---|
-| `zh-CN` | 34 | Runtime Wave 1 + hub scaffold |
-| `ja` | 34 | Runtime Wave 1 + hub scaffold |
-| `ru` | 34 | Runtime Wave 1 + hub scaffold |
-| `fr` | 34 | Runtime Wave 1 + hub scaffold |
+| `zh-CN` | 0 | Full top-level parity (bridge + localized) |
+| `ja` | 0 | Full top-level parity (bridge + localized) |
+| `ru` | 0 | Full top-level parity (bridge + localized) |
+| `fr` | 0 | Full top-level parity (bridge + localized) |
 | `vi` | 0 | Full top-level parity |
 | `el` | 0 | Full top-level parity |
 
-## What Was Completed in This Wave
+## Closure Record (2026-02-24)
 
-- `vi` parity lifted to full top-level coverage by adding localized bridge docs for missing files.
-- `el` parity lifted to full top-level coverage by adding localized bridge docs for missing files.
-- `zh-CN`/`ja`/`ru`/`fr` received Wave 1 runtime localization bridge docs:
+Completed in this PR stream:
+
+- Wave 1 runtime localization for `zh-CN`/`ja`/`ru`/`fr`:
   - `commands-reference.md`
   - `providers-reference.md`
   - `channels-reference.md`
   - `config-reference.md`
   - `operations-runbook.md`
   - `troubleshooting.md`
-- Canonical path remained `docs/i18n/<locale>/`.
+- Full closure for remaining top-level docs in `zh-CN`/`ja`/`ru`/`fr` via localized bridge pages.
+- Full top-level parity already maintained for `vi` and `el`.
 
-## Remaining Gaps (Actionable)
+## Remaining Gaps (Baseline Scope)
 
-For `zh-CN`/`ja`/`ru`/`fr`, Wave 1 runtime docs are now available. Remaining missing set focuses on deeper integrations, governance, and support docs:
+- None. Top-level baseline gaps are closed for all supported locales.
 
-- operations/extensions: `network-deployment`, `mattermost-setup`, `nextcloud-talk-setup`, `one-click-bootstrap`
-- integrations: `custom-providers`, `zai-glm-setup`, `langgraph-integration`
-- governance: `docs-inventory`, `i18n-guide`, `i18n-coverage`, `docs-audit-2026-02-24`
-- security/project/hardware support docs and related playbooks
+## Optional Next Depth
 
-## Proposed Completion Waves
+These are not baseline blockers, but can be advanced in future waves:
 
-### Wave 1 (high-impact runtime) - Completed on 2026-02-24
-
-For `zh-CN`/`ja`/`ru`/`fr`:
-
-- `commands-reference.md`
-- `config-reference.md`
-- `troubleshooting.md`
-- `operations-runbook.md`
-- `providers-reference.md`
-- `channels-reference.md`
-
-### Wave 2 (integration + security)
-
-- `custom-providers.md`
-- `zai-glm-setup.md`
-- `langgraph-integration.md`
-- `network-deployment.md`
-- `audit-event-schema.md`
-- `proxy-agent-playbook.md`
-- `mattermost-setup.md`
-- `nextcloud-talk-setup.md`
-
-### Wave 3 (governance + snapshots)
-
-- `docs-inventory.md`
-- `i18n-guide.md`
-- `i18n-coverage.md`
-- latest docs/project snapshots and audit snapshots
+- deeper per-collection localization indexes under category subdirectories
+- fuller narrative translation depth for bridge pages currently linked to English normative docs
 
 ## Tracking Rules
 
-1. Keep this backlog date-stamped and append updates instead of rewriting historical decisions.
-2. When a locale closes a gap wave, update counts and coverage status in `docs/i18n-coverage.md`.
-3. Keep locale navigation parity complete even when content depth is still partial.
+1. Keep this file date-stamped and append major closure checkpoints.
+2. If new top-level English docs are added, re-run parity count and update this file in the same PR.
+3. Keep locale navigation parity complete when adding/removing locales.

@@ -22,6 +22,15 @@
 - Операционный runbook: [operations-runbook.md](operations-runbook.md)
 - Troubleshooting: [troubleshooting.md](troubleshooting.md)
 
+Текущее состояние: **top-level parity закрыт** (40/40).
+
+## Полный индекс и governance
+
+- Локальный каталог документов: [docs-inventory.md](docs-inventory.md)
+- Руководство i18n: [i18n-guide.md](i18n-guide.md)
+- Покрытие i18n: [i18n-coverage.md](i18n-coverage.md)
+- Трекинг gap: [i18n-gap-backlog.md](i18n-gap-backlog.md)
+
 ## Категории
 
 - Начало работы: [../../getting-started/README.md](../../getting-started/README.md)

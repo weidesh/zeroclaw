@@ -22,6 +22,15 @@
 - 运维 Runbook：[operations-runbook.md](operations-runbook.md)
 - 故障排查：[troubleshooting.md](troubleshooting.md)
 
+当前状态：**top-level 文档 parity 已完成**（40/40）。
+
+## 全量文档与治理
+
+- 本地文档总清单：[docs-inventory.md](docs-inventory.md)
+- i18n 执行指南：[i18n-guide.md](i18n-guide.md)
+- i18n 覆盖状态：[i18n-coverage.md](i18n-coverage.md)
+- i18n 缺口追踪：[i18n-gap-backlog.md](i18n-gap-backlog.md)
+
 ## 按分类浏览
 
 - 快速入门：[../../getting-started/README.md](../../getting-started/README.md)

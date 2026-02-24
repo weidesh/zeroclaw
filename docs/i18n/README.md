@@ -2,6 +2,8 @@
 
 Canonical localized documentation trees live here.
 
+Top-level parity status: **all supported locales are 0-gap against `docs/*.md` baseline** (last validated 2026-02-24).
+
 ## Locales
 
 - 简体中文 (Chinese): [zh-CN/README.md](zh-CN/README.md)

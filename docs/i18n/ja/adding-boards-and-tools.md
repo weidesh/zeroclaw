@@ -1,0 +1,23 @@
+# ローカライズブリッジ: Adding Boards And Tools
+
+このページは初版ローカライズ段階のブリッジです。テーマの要点を把握し、英語版の規範文書へ移動するために使います。
+
+英語版原文:
+
+- [../../adding-boards-and-tools.md](../../adding-boards-and-tools.md)
+
+## 主な利用場面
+
+- このトピックの目的と境界を把握してから、実作業は英語版で確認する。
+- 運用・調査・実装時の用語をそろえる。
+
+## ローカライズ規則
+
+- コマンド名、設定キー、API パス、コード識別子は英語のまま保持します。
+- 実装仕様と挙動の最終定義は英語版原文を優先します。
+
+## 関連エントリ
+
+- [README.md](README.md)
+- [SUMMARY.md](SUMMARY.md)
+- [docs-inventory.md](docs-inventory.md)
